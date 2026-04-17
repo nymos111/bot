@@ -3,7 +3,6 @@ import logging
 import os
 import time
 import random
-from collections import defaultdict
 
 import requests
 from dotenv import load_dotenv
@@ -37,17 +36,9 @@ def safe_generate(prompt: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": """Ты — режиссёр истории.
-
-Пиши:
-- 1-2 коротких предложения
-- атмосферно
-- иногда усиливай подозрение
-
-НЕ:
-- не объясняй
-- не пиши длинно
-- не ломай сюжет"""
+                        "content": """Ты режиссёр истории.
+Пиши 1-2 коротких атмосферных предложения.
+Не объясняй. Не пиши длинно."""
                     },
                     {"role": "user", "content": prompt[:2000]},
                 ],
@@ -63,13 +54,10 @@ def safe_generate(prompt: str) -> str:
         if not text or len(text) < 5:
             return "Тишина становится напряжённой."
 
-        if len(text) > 300:
-            text = text[:300]
-
-        return text
+        return text[:300]
 
     except Exception as e:
-        logging.error(e)
+        logging.error(f"AI ERROR: {e}")
         return random.choice([
             "Напряжение растёт.",
             "Кто-то явно скрывает правду.",
@@ -79,7 +67,7 @@ def safe_generate(prompt: str) -> str:
 # ================= DATA =================
 
 class Player:
-    def __init__(self, user: types.User):
+    def __init__(self, user):
         self.id = user.id
         self.name = user.first_name
         self.trust = 0
@@ -97,52 +85,48 @@ class Session:
 
 sessions = {}
 
-# ================= LOGIC =================
+# ================= HELPERS =================
 
-def analyze(player: Player, text: str):
+def analyze(player, text):
     t = text.lower()
-
-    if "не верю" in t or "подозр" in t:
+    if "не верю" in t:
         player.suspicion += 1
-    if "давай" in t or "вместе" in t:
+    if "давай" in t:
         player.trust += 1
-    if "убить" in t or "сломать" in t:
+    if "убить" in t:
         player.chaos += 1
 
+def should_trigger(session):
+    return (
+        len(session.messages) >= 5 and
+        time.time() - session.last_bot_time > 60
+    )
 
-def should_trigger(session: Session):
-    if len(session.messages) < 5:
-        return False
-    if time.time() - session.last_bot_time < 60:
-        return False
-    return True
+async def ensure_player(session, user):
+    if user.id not in session.players:
+        session.players[user.id] = Player(user)
+        try:
+            await bot.send_message(user.id, "Ты участвуешь в истории.")
+        except:
+            pass
 
 # ================= COMMANDS =================
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer("Бот работает. В группе напиши /story")
 
 @dp.message(Command("story"))
 async def start_story(message: types.Message):
     genre = message.text.replace("/story", "").strip() or "драма"
-
     sessions[message.chat.id] = Session(genre)
-
-    await message.answer("История началась. Проверь ЛС.")
+    await message.answer(f"История началась ({genre}).")
 
 @dp.message(Command("endstory"))
 async def end_story(message: types.Message):
     if message.chat.id in sessions:
         sessions.pop(message.chat.id)
         await message.answer("История завершена.")
-
-# ================= PLAYER =================
-
-async def ensure_player(session: Session, user: types.User):
-    if user.id not in session.players:
-        session.players[user.id] = Player(user)
-
-        try:
-            await bot.send_message(user.id, "Ты участник истории.")
-        except:
-            pass
 
 # ================= ROUND =================
 
@@ -165,7 +149,7 @@ async def start_round(chat_id):
         try:
             await bot.send_message(p.id, "Выбери действие:", reply_markup=kb)
         except:
-            continue
+            pass
 
     await asyncio.sleep(25)
     await resolve_round(chat_id)
@@ -182,19 +166,11 @@ async def resolve_round(chat_id):
         for uid, c in session.choices.items()
     )
 
-    prompt = f"""
-Жанр: {session.genre}
-Действия:
-{text}
-Создай событие:
-"""
-
+    prompt = f"Жанр: {session.genre}\n{text}\nСобытие:"
     result = safe_generate(prompt)
 
     await bot.send_message(chat_id, result)
     session.last_bot_time = time.time()
-
-# ================= CALLBACK =================
 
 @dp.callback_query(F.data.startswith("c:"))
 async def choice(callback: types.CallbackQuery):
@@ -204,15 +180,17 @@ async def choice(callback: types.CallbackQuery):
         if uid in s.players:
             s.choices[uid] = callback.data[2:]
 
-    await callback.answer("Ок")
+    await callback.answer("Принято")
 
-# ================= OBSERVER =================
+# ================= GROUP =================
 
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
-async def observe(message: types.Message):
+async def group_handler(message: types.Message):
     session = sessions.get(message.chat.id)
     if not session or not message.text:
         return
+
+    print("MSG:", message.text)
 
     await ensure_player(session, message.from_user)
 
@@ -222,20 +200,13 @@ async def observe(message: types.Message):
     session.messages.append(text)
     analyze(player, text)
 
-    if len(session.messages) > 20:
-        session.messages = session.messages[-20:]
+    session.messages = session.messages[-20:]
 
     if not should_trigger(session):
         return
 
     context = "\n".join(session.messages[-10:])
-
-    prompt = f"""
-Жанр: {session.genre}
-Чат:
-{context}
-Создай напряжение:
-"""
+    prompt = f"Жанр: {session.genre}\nЧат:\n{context}\nСобытие:"
 
     result = safe_generate(prompt)
 
@@ -249,7 +220,7 @@ async def observe(message: types.Message):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    print("Bot running")
+    print("BOT STARTED")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
