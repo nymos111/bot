@@ -108,4 +108,99 @@ async def lobby_timer(session):
     if session.started: return
     session.lobby_open = False
     if len(session.players) < 3:
-        await bot.
+        await bot.send_message(session.chat_id, "❌ Мало игроков. Игра отменена.")
+        sessions.pop(session.chat_id, None)
+    else:
+        await bot.send_message(session.chat_id, "⏰ Лобби закрыто. Пишите /go")
+
+@dp.message(Command("join"), F.chat.type.in_({"group", "supergroup"}))
+async def join_game(message: types.Message):
+    session = sessions.get(message.chat.id)
+    if not session or not session.lobby_open:
+        return await message.answer("Лобби закрыто.")
+    if message.from_user.id in session.players:
+        return await message.answer("Вы уже в игре.")
+    session.players[message.from_user.id] = Player(message.from_user)
+    await message.answer(f"✅ {message.from_user.first_name} присоединился.")
+
+@dp.message(Command("go"), F.chat.type.in_({"group", "supergroup"}))
+async def start_game(message: types.Message):
+    session = sessions.get(message.chat.id)
+    if not session or session.started:
+        return
+    if len(session.players) < 3:
+        return await message.answer("Нужно минимум 3 игрока.")
+
+    session.started = True
+    session.paused = False
+    assign_roles(session)
+
+    # Отправка ролей в ЛС
+    for p in session.players.values():
+        role_msg = {"Предатель": "🔴 Ты — ПРЕДАТЕЛЬ", "Детектив": "🔍 Ты — ДЕТЕКТИВ", "Врач": "🩹 Ты — ВРАЧ", "Шпион": "👁️ Ты — ШПИОН"}.get(p.role, "🟢 Обычный игрок")
+        try:
+            await bot.send_message(p.id, role_msg)
+        except: pass
+
+    await message.answer("🎮 Игра началась! Первая ситуация уже в чате.")
+    await send_new_situation(session)   # ← сразу первая ситуация
+
+# ================= NEW SITUATION =================
+async def send_new_situation(session: Session):
+    if not session.started or session.paused:
+        return
+
+    data = safe_generate(f"Жанр: {session.genre}\nТекущий хаос: {sum(p.chaos for p in session.players.values() if not p.dead)}")
+    session.current_situation = data["situation"]
+
+    await bot.send_message(session.chat_id, f"📍 **Ситуация:**\n{data['situation']}")
+
+    # Отправляем варианты каждому игроку в ЛС
+    session.player_choices.clear()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=opt, callback_data=f"choice_{i}")]
+        for i, opt in enumerate(data["options"])
+    ])
+
+    for p in session.players.values():
+        if not p.dead:
+            try:
+                await bot.send_message(p.id, "Выберите действие:", reply_markup=kb)
+            except: pass
+
+    # Ждём 50 секунд на выбор
+    await asyncio.sleep(50)
+    await process_choices(session, data["options"])
+
+# ================= PROCESS CHOICES =================
+async def process_choices(session: Session, options: list):
+    if not session.player_choices:
+        await bot.send_message(session.chat_id, "Никто не сделал выбор. Ситуация усложняется...")
+    
+    # Увеличиваем хаос предателю
+    for pid, choice_idx in session.player_choices.items():
+        player = session.players.get(pid)
+        if player and player.id == session.traitor_id:
+            player.chaos += 2
+
+    await send_new_situation(session)   # следующая ситуация
+
+# ================= CHOICE HANDLER =================
+@dp.callback_query(lambda c: c.data.startswith("choice_"))
+async def handle_choice(callback: CallbackQuery):
+    session = next((s for s in sessions.values() if callback.from_user.id in s.players), None)
+    if not session or not session.current_situation or session.paused:
+        return await callback.answer("Игра неактивна")
+
+    choice_idx = int(callback.data.split("_")[1])
+    session.player_choices[callback.from_user.id] = choice_idx
+    await callback.answer("✅ Выбор принят", show_alert=False)
+
+# ================= STOP / RESUME =================
+@dp.message(Command("stop"), F.chat.type.in_({"group", "supergroup"}))
+async def stop_game(message: types.Message):
+    session = sessions.get(message.chat.id)
+    if not session or not session.started:
+        return await message.answer("Игра не запущена.")
+    session.paused = True
+    await message.answe
