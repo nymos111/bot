@@ -18,7 +18,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ================= AI =================
-async def safe_generate(prompt: str) -> dict:
+async def safe_generate(prompt):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -27,16 +27,10 @@ async def safe_generate(prompt: str) -> dict:
                 json={
                     "model": "google/gemma-4-31b-it:free",
                     "messages": [
-                        {"role": "system", "content": """Ты — Game Master.
-Возвращай строго JSON:
-{
- "situation": "описание",
- "options": ["1","2","3","4"]
-}"""},
+                        {"role": "system", "content": "Верни JSON с situation и options (4 варианта)"},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.7,
-                    "max_tokens": 400
+                    "temperature": 0.7
                 },
                 timeout=15
             ) as r:
@@ -45,8 +39,8 @@ async def safe_generate(prompt: str) -> dict:
                 return json.loads(content)
     except:
         return {
-            "situation": "Вы в опасной ситуации. Нужно действовать.",
-            "options": ["Осмотреться", "Спрятаться", "Идти вперед", "Ждать"]
+            "situation": "Вы в опасной ситуации.",
+            "options": ["Осмотреться", "Спрятаться", "Идти", "Ждать"]
         }
 
 # ================= DATA =================
@@ -56,8 +50,6 @@ class Player:
         self.name = user.first_name
         self.role = "Игрок"
         self.dead = False
-        self.vote = None
-        self.action_used = False
 
 class Session:
     def __init__(self, chat_id, genre):
@@ -65,10 +57,8 @@ class Session:
         self.genre = genre
         self.players = {}
         self.started = False
-        self.paused = False
         self.lobby_open = True
         self.traitor_id = None
-        self.creator_id = None
         self.choices = {}
         self.votes = {}
         self.round = 0
@@ -80,15 +70,11 @@ def assign_roles(session):
     ids = list(session.players.keys())
     random.shuffle(ids)
 
+    if not ids:
+        return
+
     session.traitor_id = ids[0]
     session.players[ids[0]].role = "Предатель"
-
-    if len(ids) >= 4:
-        session.players[ids[1]].role = "Детектив"
-    if len(ids) >= 5:
-        session.players[ids[2]].role = "Врач"
-    if len(ids) >= 6:
-        session.players[ids[3]].role = "Шпион"
 
 # ================= UTILS =================
 def alive_players(session):
@@ -96,144 +82,130 @@ def alive_players(session):
 
 def check_win(session):
     alive = alive_players(session)
-    traitor_alive = any(p.id == session.traitor_id and not p.dead for p in alive)
+
+    traitor_alive = False
+    for p in alive:
+        if p.id == session.traitor_id:
+            traitor_alive = True
 
     if not traitor_alive:
         return "Игроки победили"
+
     if len(alive) <= 2:
         return "Предатель победил"
+
     return None
 
-# ================= COMMANDS =================
-async def set_commands():
-    await bot.set_my_commands([
-        BotCommand(command="story", description="Создать игру"),
-        BotCommand(command="join", description="Войти"),
-        BotCommand(command="go", description="Старт"),
-    ])
-
-# ================= GAME =================
+# ================= GAME LOOP =================
 async def game_loop(session):
-    while session.started and not session.paused:
+    while session.started:
         session.round += 1
 
-        # ---- СИТУАЦИЯ ----
-        data = await safe_generate(f"Жанр: {session.genre}, раунд {session.round}")
+        data = await safe_generate("Жанр: " + session.genre)
+
         await bot.send_message(
             session.chat_id,
-            f"📍 <b>Раунд {session.round}</b>\n{data['situation']}",
-            parse_mode="HTML"
+            "Раунд " + str(session.round) + "\n" + data["situation"]
         )
 
-        # ---- ВЫБОРЫ ----
-        session.choices.clear()
+        session.choices = {}
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=opt, callback_data=f"choice_{i}")]
+            [InlineKeyboardButton(text=opt, callback_data="choice_" + str(i))]
             for i, opt in enumerate(data["options"])
         ])
 
         for p in alive_players(session):
             try:
-                await bot.send_message(p.id, "Выберите действие:", reply_markup=kb)
+                await bot.send_message(p.id, "Выбери:", reply_markup=kb)
             except:
                 pass
 
-        # ожидание
-        for _ in range(40):
+        # ожидание выбора
+        for _ in range(30):
             if len(session.choices) >= len(alive_players(session)):
                 break
             await asyncio.sleep(1)
 
-        await bot.send_message(session.chat_id, "💬 Обсуждение (20 сек)")
-        await asyncio.sleep(20)
+        await bot.send_message(session.chat_id, "Обсуждение 15 сек")
+        await asyncio.sleep(15)
 
-        # ---- ГОЛОСОВАНИЕ ----
-        session.votes.clear()
+        # голосование
+        session.votes = {}
 
         alive = alive_players(session)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=p.name, callback_data=f"vote_{p.id}")]
-            for p in alive
-        ])
 
-        for p in alive:
-            try:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=p.name, callback_data="vote_" + str(p.id))]
+            for p in alive:
+                try:
                 await bot.send_message(p.id, "Голосуй:", reply_markup=kb)
             except:
                 pass
 
-        for _ in range(30):
+        for _ in range(20):
             if len(session.votes) >= len(alive):
                 break
             await asyncio.sleep(1)
 
         # подсчёт голосов
         vote_count = {}
+
         for v in session.votes.values():
             vote_count[v] = vote_count.get(v, 0) + 1
 
-        result_text = "📊 Голосование:\n"
+        text = "Голосование:\n"
+
         for pid, count in vote_count.items():
-            name = session.players[pid].name
-            result_text += f"{name}: {count}\n"
+            text += session.players[pid].name + ": " + str(count) + "\n"
 
         if vote_count:
             killed_id = max(vote_count, key=vote_count.get)
             session.players[killed_id].dead = True
-            result_text += f"\n☠️ Убит: {session.players[killed_id].name}"
+            text += "Убит: " + session.players[killed_id].name
 
-        await bot.send_message(session.chat_id, result_text)
+        await bot.send_message(session.chat_id, text)
 
-        # ---- НОЧЬ ----
+        # ночь
         await process_night(session)
 
-        # ---- ПРОВЕРКА ПОБЕДЫ ----
         win = check_win(session)
         if win:
-            await bot.send_message(session.chat_id, f"🏁 {win}")
+            await bot.send_message(session.chat_id, win)
             session.started = False
             break
 
 # ================= NIGHT =================
 async def process_night(session):
-    target = None
-    heal = None
+    alive = alive_players(session)
 
-    for p in alive_players(session):
-        if p.role == "Предатель":
-            target = random.choice(alive_players(session)).id
-        if p.role == "Врач":
-            heal = random.choice(alive_players(session)).id
+    if not alive:
+        return
 
-    if target and target != heal:
+    target = random.choice(alive).id
+
+    if target != session.traitor_id:
         session.players[target].dead = True
-        await bot.send_message(session.chat_id, f"🌙 Ночью убит {session.players[target].name}")
+        await bot.send_message(session.chat_id, "Ночью убит " + session.players[target].name)
     else:
-        await bot.send_message(session.chat_id, "🌙 Никто не погиб")
+        await bot.send_message(session.chat_id, "Никто не умер")
 
-# ================= HANDLERS =================
-@dp.message(Command("story"), F.chat.type.in_({"group", "supergroup"}))
+# ================= COMMANDS =================
+@dp.message(Command("story"))
 async def story(message: types.Message):
     session = Session(message.chat.id, "ужасы")
-    session.creator_id = message.from_user.id
     sessions[message.chat.id] = session
 
-    await message.answer("Игра создана. /join (60 сек)")
-    asyncio.create_task(lobby_timer(session))
-
-async def lobby_timer(session):
-    await asyncio.sleep(60)
-    session.lobby_open = False
+    await message.answer("Создано. /join")
 
 @dp.message(Command("join"))
 async def join(message: types.Message):
     session = sessions.get(message.chat.id)
-    if not session or not session.lobby_open:
+    if not session:
         return
 
     session.players[message.from_user.id] = Player(message.from_user)
-    await message.answer(f"{message.from_user.first_name} вошёл")
+    await message.answer(message.from_user.first_name + " вошёл")
 
 @dp.message(Command("go"))
 async def go(message: types.Message):
@@ -246,16 +218,69 @@ async def go(message: types.Message):
 
     for p in session.players.values():
         try:
-            await bot.send_message(p.id, f"Твоя роль: {p.role}")
+            await bot.send_message(p.id, "Роль: " + p.role)
         except:
             pass
 
     asyncio.create_task(game_loop(session))
 
+# ================= CALLBACKS =================
 @dp.callback_query(lambda c: c.data.startswith("choice_"))
 async def choice(callback: CallbackQuery):
-    session = next((s for s in sessions.values() if callback.from_user.id in s.players), None)
+    if not callback.from_user:
+        return
+
+    user_id = callback.from_user.id
+
+    session = None
+    for s in sessions.values():
+        if user_id in s.players:
+            session = s
+            break
+
     if not session:
         return
 
-    if callback.from
+    if user_id in session.choices:
+        await callback.answer("Уже выбрал")
+        return
+
+    idx = int(callback.data.split("_")[1])
+    session.choices[user_id] = idx
+
+    await callback.answer("OK")
+
+@dp.callback_query(lambda c: c.data.startswith("vote_"))
+async def vote(callback: CallbackQuery):
+    if not callback.from_user:
+        return
+
+    user_id = callback.from_user.id
+
+    session = None
+    for s in sessions.values():
+        if user_id in s.players:
+            session = s
+            break
+
+    if not session:
+        return
+
+    if user_id in session.votes:
+        await callback.answer("Уже голосовал")
+        return
+
+    target = int(callback.data.split("_")[1])
+    session.votes[user_id] = target
+
+    await callback.answer("Голос принят")
+
+# ================= RUN =================
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+        for p in alive:
