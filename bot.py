@@ -7,7 +7,7 @@ import requests
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, ChatPermissions
 
 load_dotenv()
 
@@ -46,7 +46,7 @@ class Player:
         self.role = "Игрок"
         self.chaos = 0
         self.trust = 0
-        self.used_ability = False
+        self.dead = False
 
 class Session:
     def __init__(self, chat_id, genre):
@@ -54,24 +54,24 @@ class Session:
         self.genre = genre
         self.players = {}
         self.started = False
+        self.lobby_open = True
         self.traitor_id = None
-        self.creator_id = None
-        self.messages = []
         self.votes = {}
+        self.start_time = time.time()
 
 sessions = {}
 
-# ================= BOT COMMANDS =================
+# ================= COMMANDS =================
 async def set_commands():
     await bot.set_my_commands([
         BotCommand(command="story", description="Создать игру"),
-        BotCommand(command="join", description="Войти в игру"),
+        BotCommand(command="join", description="Войти"),
         BotCommand(command="go", description="Начать"),
         BotCommand(command="vote", description="Голосование"),
-        BotCommand(command="kick", description="Исключить игрока"),
+        BotCommand(command="kick", description="Исключить"),
     ])
 
-# ================= ROLE ASSIGN =================
+# ================= ROLE =================
 def assign_roles(session):
     ids = list(session.players.keys())
     random.shuffle(ids)
@@ -86,35 +86,48 @@ def assign_roles(session):
     if len(ids) >= 6:
         session.players[ids[3]].role = "Шпион"
 
-# ================= COMMANDS =================
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    if message.chat.type == "private":
-        await message.answer("Готов. Вернись в чат и нажми /join")
-
+# ================= STORY =================
 @dp.message(Command("story"), F.chat.type.in_({"group", "supergroup"}))
 async def story(message: types.Message):
     genre = message.text.replace("/story", "").strip() or "детектив"
 
     session = Session(message.chat.id, genre)
-    session.creator_id = message.from_user.id
     sessions[message.chat.id] = session
 
-    await message.answer("🎮 Игра создана! Напишите /join")
+    await message.answer("🎮 Лобби открыто (60 сек). Напишите /join")
 
+    asyncio.create_task(lobby_timer(session))
+
+
+async def lobby_timer(session):
+    await asyncio.sleep(60)
+
+    if session.started:
+        return
+
+    session.lobby_open = False
+
+    if len(session.players) < 3:
+        await bot.send_message(session.chat_id, "Недостаточно игроков. Игра отменена.")
+        sessions.pop(session.chat_id, None)
+    else:
+        await bot.send_message(session.chat_id, "Лобби закрыто. Запускайте /go")
+
+# ================= JOIN =================
 @dp.message(Command("join"), F.chat.type.in_({"group", "supergroup"}))
 async def join(message: types.Message):
     session = sessions.get(message.chat.id)
 
-    if not session or session.started:
-        return await message.answer("Нет активной игры.")
+    if not session or not session.lobby_open:
+        return await message.answer("Лобби закрыто.")
 
     if message.from_user.id in session.players:
         return await message.answer("Ты уже в игре.")
 
     session.players[message.from_user.id] = Player(message.from_user)
-    await message.answer(f"{message.from_user.first_name} в игре.")
+    await message.answer(f"{message.from_user.first_name} вошёл в игру.")
 
+# ================= START =================
 @dp.message(Command("go"), F.chat.type.in_({"group", "supergroup"}))
 async def go(message: types.Message):
     session = sessions.get(message.chat.id)
@@ -126,22 +139,13 @@ async def go(message: types.Message):
         return await message.answer("Нужно минимум 3 игрока.")
 
     session.started = True
+    session.lobby_open = False
+
     assign_roles(session)
 
     for p in session.players.values():
-        if p.role == "Предатель":
-            text = "🔴 Ты предатель. /sabotage"
-        elif p.role == "Детектив":
-            text = "🔍 Ты детектив. /investigate @user"
-        elif p.role == "Врач":
-            text = "🩹 Ты врач. /heal"
-        elif p.role == "Шпион":
-            text = "👁 Ты шпион. /peek"
-        else:
-            text = "🟢 Ты игрок."
-
         try:
-            await bot.send_message(p.id, text)
+            await bot.send_message(p.id, f"Твоя роль: {p.role}")
         except:
             pass
 
@@ -149,51 +153,6 @@ async def go(message: types.Message):
     await message.answer(f"Игра началась\n{intro}")
 
     asyncio.create_task(game_loop(session))
-
-# ================= ABILITIES =================
-@dp.message(Command("sabotage"), F.chat.type == "private")
-async def sabotage(message: types.Message):
-    for s in sessions.values():
-        if s.started and message.from_user.id in s.players:
-            p = s.players[message.from_user.id]
-            if p.role != "Предатель":
-                return await message.answer("Ты не предатель.")
-            p.chaos += 3
-            return await message.answer("Хаос увеличен.")
-
-@dp.message(Command("investigate"), F.chat.type == "private")
-async def investigate(message: types.Message):
-    args = message.text.split()
-    if len(args) < 2:
-        return
-
-    target = args[1].replace("@", "")
-
-    for s in sessions.values():
-        if s.started and message.from_user.id in s.players:
-            for p in s.players.values():
-                if p.username == target:
-                    if p.role == "Предатель":
-                        return await message.answer("🔴 Подозрительный")
-                    else:
-                        return await message.answer("🟢 Чист")
-
-@dp.message(Command("heal"), F.chat.type == "private")
-async def heal(message: types.Message):
-    for s in sessions.values():
-        if s.started and message.from_user.id in s.players:
-            p = s.players[message.from_user.id]
-            if p.role != "Врач":
-                return
-            p.trust += 2
-            return await message.answer("Доверие увеличено.")
-
-@dp.message(Command("peek"), F.chat.type == "private")
-async def peek(message: types.Message):
-    for s in sessions.values():
-        if s.started and message.from_user.id in s.players:
-            target = random.choice(list(s.players.values()))
-            return await message.answer(f"{target.name} ведёт себя странно...")
 
 # ================= VOTE =================
 @dp.message(Command("vote"), F.chat.type.in_({"group", "supergroup"}))
@@ -203,7 +162,7 @@ async def vote(message: types.Message):
         return
 
     s.votes = {}
-    await message.answer("Голосование началось. Пиши /vote @user")
+    await message.answer("Голосование началось. /vote @user")
 
 @dp.message(F.text.startswith("/vote @"))
 async def vote_process(message: types.Message):
@@ -233,14 +192,26 @@ async def kick(message: types.Message):
         counts[v] = counts.get(v, 0) + 1
 
     kicked = max(counts, key=counts.get)
+    player = s.players[kicked]
+
+    player.dead = True
+
+    # мут
+    try:
+        await bot.restrict_chat_member(
+            s.chat_id,
+            kicked,
+            ChatPermissions(can_send_messages=False)
+        )
+    except:
+        pass
 
     if kicked == s.traitor_id:
         await message.answer("Предатель найден. Победа игроков")
         s.started = False
         return
 
-    del s.players[kicked]
-    await message.answer("Игрок исключён")
+    await message.answer(f"{player.name} исключён и замолкает...")
 
 # ================= GAME LOOP =================
 async def game_loop(session):
@@ -250,8 +221,8 @@ async def game_loop(session):
         if not session.started:
             return
 
-        chaos = sum(p.chaos for p in session.players.values())
-        trust = sum(p.trust for p in session.players.values())
+        chaos = sum(p.chaos for p in session.players.values() if not p.dead)
+        trust = sum(p.trust for p in session.players.values() if not p.dead)
 
         text = safe_generate(f"{session.genre} хаос={chaos} доверие={trust}")
         await bot.send_message(session.chat_id, text)
@@ -268,6 +239,20 @@ async def end_game(session):
         await bot.send_message(session.chat_id, "Игроки победили")
 
     session.started = False
+
+# ================= MUTE DEAD =================
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def mute_dead(message: types.Message):
+    s = sessions.get(message.chat.id)
+    if not s or not s.started:
+        return
+
+    p = s.players.get(message.from_user.id)
+    if p and p.dead:
+        try:
+            await message.delete()
+        except:
+            pass
 
 # ================= RUN =================
 async def main():
