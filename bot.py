@@ -1,3 +1,5 @@
+
+
 import asyncio
 import logging
 import os
@@ -241,7 +243,7 @@ async def game_loop(session):
             if detective:
                 try:
                     await bot.send_message(detective.id, f"Роль: {role}")
-        except:
+                    except:
                     pass
 
         if session.sabotage:
