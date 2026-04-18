@@ -34,10 +34,13 @@ async def safe_generate(prompt):
                     "messages": [
                         {
                             "role": "system",
-                            "content": """Ты ведущий игры. Отвечай строго JSON:
+                            "content": """Ты — ведущий напряжённой психологической игры уровня Among Us + Мафия.
+Создавай опасные ситуации, усиливай паранойю, намекай на предателя, учитывай прошлые события.
+
+Формат строго JSON:
 {
- "situation": "описание",
- "options": ["1","2","3","4"]
+ "situation": "опасная ситуация",
+ "options": ["действие 1", "действие 2", "действие 3", "действие 4"]
 }"""
                         },
                         {"role": "user", "content": prompt}
@@ -52,8 +55,8 @@ async def safe_generate(prompt):
                 return json.loads(content[start:end])
     except:
         return {
-            "situation": "Реальность искажается вокруг вас.",
-            "options": ["Осмотреться", "Бежать", "Кричать", "Спрятаться"]
+            "situation": "Реальность трещит. Кто-то среди вас ведёт двойную игру.",
+            "options": ["Осмотреться", "Обвинить кого-то", "Спрятаться", "Бежать"]
         }
 
 class Player:
@@ -62,6 +65,7 @@ class Player:
         self.name = user.first_name
         self.role = "Игрок"
         self.dead = False
+        self.suspicion = 0
 
 class Session:
     def __init__(self, chat_id):
@@ -76,6 +80,8 @@ class Session:
         self.kill_target = None
         self.heal_target = None
         self.check_target = None
+        self.min_rounds = 3
+        self.sabotage = False
 
 def alive(session):
     return [p for p in session.players.values() if not p.dead]
@@ -93,6 +99,8 @@ def assign_roles(session):
         session.players[ids[2]].role = "Врач"
 
 def win_check(session):
+    if session.round < session.min_rounds:
+        return None
     alive_players = alive(session)
     traitor_alive = any(p.id == session.traitor_id and not p.dead for p in alive_players)
     if not traitor_alive:
@@ -105,18 +113,22 @@ async def game_loop(session):
     while session.started:
         session.round += 1
 
-        context = " ".join(session.history[-5:])
-        data = await safe_generate(context)
+        alive_names = [p.name for p in alive(session)]
+        dead_names = [p.name for p in session.players.values() if p.dead]
 
+        context = f"""
+Живые: {alive_names}
+Мёртвые: {dead_names}
+История: {session.history[-5:]}
+Есть скрытый предатель. Усиль напряжение.
+"""
+
+        data = await safe_generate(context)
         session.history.append(data["situation"])
 
-        await bot.send_message(
-            session.chat_id,
-            f"Раунд {session.round}\n{data['situation']}"
-        )
+        await bot.send_message(session.chat_id, f"Раунд {session.round}\n{data['situation']}")
 
         session.choices = {}
-
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=o, callback_data=f"choice_{i}")]
             for i, o in enumerate(data["options"])
@@ -133,8 +145,20 @@ async def game_loop(session):
                 break
             await asyncio.sleep(1)
 
-        await bot.send_message(session.chat_id, "Обсуждение 15 сек")
-        await asyncio.sleep(15)
+        chaos = 0
+        for uid, choice in session.choices.items():
+            player = session.players[uid]
+            if player.role == "Предатель":
+                chaos += 2
+                player.suspicion += random.randint(0, 1)
+            else:
+                chaos += random.randint(0, 1)
+                player.suspicion += random.randint(0, 2)
+
+        session.history.append(f"хаос:{chaos}")
+
+        await bot.send_message(session.chat_id, "Обсуждение 20 сек")
+        await asyncio.sleep(20)
 
         session.votes = {}
 
@@ -149,7 +173,7 @@ async def game_loop(session):
             except:
                 pass
 
-        for _ in range(20):
+        for _ in range(25):
             if len(session.votes) >= len(alive(session)):
                 break
             await asyncio.sleep(1)
@@ -172,6 +196,7 @@ async def game_loop(session):
         session.kill_target = None
         session.heal_target = None
         session.check_target = None
+        session.sabotage = False
 
         for p in alive(session):
             if p.role == "Предатель":
@@ -179,9 +204,11 @@ async def game_loop(session):
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t.name, callback_data=f"kill_{t.id}")]
                     for t in targets
+                ] + [
+                    [InlineKeyboardButton(text="Саботаж", callback_data="sabotage")]
                 ])
                 try:
-                    await bot.send_message(p.id, "Кого убить:", reply_markup=kb)
+                    await bot.send_message(p.id, "Действие:", reply_markup=kb)
                 except:
                     pass
 
@@ -191,7 +218,7 @@ async def game_loop(session):
                     for t in alive(session)
                 ])
                 try:
-                    await bot.send_message(p.id, "Кого лечить:", reply_markup=kb)
+                    await bot.send_message(p.id, "Лечение:", reply_markup=kb)
                 except:
                     pass
 
@@ -202,7 +229,7 @@ async def game_loop(session):
                     for t in targets
                 ])
                 try:
-                    await bot.send_message(p.id, "Кого проверить:", reply_markup=kb)
+                    await bot.send_message(p.id, "Проверка:", reply_markup=kb)
                 except:
                     pass
 
@@ -214,14 +241,21 @@ async def game_loop(session):
             if detective:
                 try:
                     await bot.send_message(detective.id, f"Роль: {role}")
-                except:
+        except:
                     pass
+
+        if session.sabotage:
+            await bot.send_message(session.chat_id, "⚠️ Саботаж усиливает хаос")
 
         if session.kill_target and session.kill_target != session.heal_target:
             session.players[session.kill_target].dead = True
             await bot.send_message(session.chat_id, f"Ночью убит {session.players[session.kill_target].name}")
         else:
             await bot.send_message(session.chat_id, "Ночью никто не умер")
+
+        suspects = sorted(alive(session), key=lambda x: x.suspicion, reverse=True)
+        if suspects:
+            await bot.send_message(session.chat_id, f"Подозрение падает на: {suspects[0].name}")
 
         win = win_check(session)
         if win:
@@ -307,6 +341,12 @@ async def callbacks(callback: CallbackQuery):
             return
         session.check_target = int(data.split("_")[1])
         await callback.answer("Проверка выбрана")
+
+    elif data == "sabotage":
+        if user_id != session.traitor_id:
+            return
+        session.sabotage = True
+        await callback.answer("Саботаж активирован")
 
 async def main():
     logging.basicConfig(level=logging.INFO)
