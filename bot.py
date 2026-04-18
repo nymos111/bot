@@ -137,8 +137,11 @@ async def game_loop(session):
 
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=p.name, callback_data="vote_" + str(p.id))]
-            for p in alive:
-                try:
+            for p in alive
+        ])
+
+        for p in alive:
+            try:
                 await bot.send_message(p.id, "Голосуй:", reply_markup=kb)
             except:
                 pass
@@ -282,5 +285,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-        for p in alive:
