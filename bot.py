@@ -1,4 +1,140 @@
-await asyncio.sleep(15)
+import asyncio
+import logging
+import os
+import random
+import json
+import aiohttp
+from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+sessions = {}
+
+async def safe_generate(prompt):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "HTTP-Referer": "https://local.game",
+                    "X-Title": "TwistRealm"
+                },
+                json={
+                    "model": "google/gemma-4-31b-it:free",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": """Ты ведущий игры. Отвечай строго JSON:
+{
+ "situation": "описание",
+ "options": ["1","2","3","4"]
+}"""
+                        },
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.9
+                }
+            ) as r:
+                data = await r.json()
+                content = data["choices"][0]["message"]["content"]
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                return json.loads(content[start:end])
+    except:
+        return {
+            "situation": "Реальность искажается вокруг вас.",
+            "options": ["Осмотреться", "Бежать", "Кричать", "Спрятаться"]
+        }
+
+class Player:
+    def __init__(self, user):
+        self.id = user.id
+        self.name = user.first_name
+        self.role = "Игрок"
+        self.dead = False
+
+class Session:
+    def __init__(self, chat_id):
+        self.chat_id = chat_id
+        self.players = {}
+        self.started = False
+        self.traitor_id = None
+        self.history = []
+        self.choices = {}
+        self.votes = {}
+        self.round = 0
+        self.kill_target = None
+        self.heal_target = None
+        self.check_target = None
+
+def alive(session):
+    return [p for p in session.players.values() if not p.dead]
+
+def assign_roles(session):
+    ids = list(session.players.keys())
+    random.shuffle(ids)
+    if not ids:
+        return
+    session.traitor_id = ids[0]
+    session.players[ids[0]].role = "Предатель"
+    if len(ids) > 3:
+        session.players[ids[1]].role = "Детектив"
+    if len(ids) > 4:
+        session.players[ids[2]].role = "Врач"
+
+def win_check(session):
+    alive_players = alive(session)
+    traitor_alive = any(p.id == session.traitor_id and not p.dead for p in alive_players)
+    if not traitor_alive:
+        return "Игроки победили"
+    if len(alive_players) <= 2:
+        return "Предатель победил"
+    return None
+
+async def game_loop(session):
+    while session.started:
+        session.round += 1
+
+        context = " ".join(session.history[-5:])
+        data = await safe_generate(context)
+
+        session.history.append(data["situation"])
+
+        await bot.send_message(
+            session.chat_id,
+            f"Раунд {session.round}\n{data['situation']}"
+        )
+
+        session.choices = {}
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=o, callback_data=f"choice_{i}")]
+            for i, o in enumerate(data["options"])
+        ])
+
+        for p in alive(session):
+            try:
+                await bot.send_message(p.id, "Действие:", reply_markup=kb)
+            except:
+                pass
+
+        for _ in range(30):
+            if len(session.choices) >= len(alive(session)):
+                break
+            await asyncio.sleep(1)
+
+        await bot.send_message(session.chat_id, "Обсуждение 15 сек")
+        await asyncio.sleep(15)
 
         session.votes = {}
 
