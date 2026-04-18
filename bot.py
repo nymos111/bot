@@ -1,5 +1,4 @@
-
-
+```python
 import asyncio
 import logging
 import os
@@ -131,7 +130,7 @@ async def game_loop(session):
         await bot.send_message(session.chat_id, f"Раунд {session.round}\n{data['situation']}")
 
         session.choices = {}
-        kb = InlineKeyboardMarkup(inline_keyboard=[
+kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=o, callback_data=f"choice_{i}")]
             for i, o in enumerate(data["options"])
         ])
@@ -243,7 +242,7 @@ async def game_loop(session):
             if detective:
                 try:
                     await bot.send_message(detective.id, f"Роль: {role}")
-                    except:
+except:
                     pass
 
         if session.sabotage:
