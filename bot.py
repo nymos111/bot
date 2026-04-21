@@ -1,6 +1,7 @@
 import asyncio
 import os
 import logging
+import random
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, types
@@ -11,26 +12,27 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from states import Onboarding, Main
 from db import init_db, save_user, save_message, get_last_messages
 from logic import extract_signals, update_interest, update_stage, analyze_context, generate_replies
+from ai import humanize_with_ai
 
 load_dotenv()
 
 bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 
-gender_kb = ReplyKeyboardMarkup(
+kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="Парень"), KeyboardButton(text="Девушка")]],
     resize_keyboard=True
 )
 
 @dp.message(Command("start"))
 async def start(message: types.Message, state: FSMContext):
-    await message.answer("Твой пол?", reply_markup=gender_kb)
+    await message.answer("Твой пол?", reply_markup=kb)
     await state.set_state(Onboarding.gender)
 
 @dp.message(Onboarding.gender)
 async def gender(message: types.Message, state: FSMContext):
     await state.update_data(gender=message.text)
-    await message.answer("Пол собеседника?", reply_markup=gender_kb)
+    await message.answer("Пол собеседника?", reply_markup=kb)
     await state.set_state(Onboarding.target_gender)
 
 @dp.message(Onboarding.target_gender)
@@ -67,15 +69,21 @@ async def analyze(message: types.Message):
     stage = update_stage(interest)
     context = analyze_context(history)
 
-    replies = generate_replies(stage, context, history)
+    base_replies = generate_replies(stage, context)
+
+    final_replies = []
+    for text in base_replies:
+        if random.random() < 0.5:
+            text = await humanize_with_ai(text)
+        final_replies.append(text)
 
     await message.answer(
         f"Интерес: {interest}\n"
         f"Стадия: {stage}\n"
         f"Динамика: {context['momentum']}\n\n"
-        f"{replies['light']}\n\n"
-        f"{replies['confident']}\n\n"
-        f"{replies['flirt']}"
+        f"1. {final_replies[0]}\n\n"
+        f"2. {final_replies[1]}\n\n"
+        f"3. {final_replies[2]}"
     )
 
 async def main():
