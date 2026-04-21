@@ -1,22 +1,5 @@
 import random
 
-STAGES = ["start", "rapport", "flirt", "comfort", "meet"]
-
-REACTIONS = ["Хаха", "Мм", "Слушай", "Интересно", "Ого"]
-HOOKS = [
-    "расскажи подробнее",
-    "что ты обычно делаешь?",
-    "это часто у тебя?",
-    "как ты к этому пришла?"
-]
-SOFTENERS = ["", "честно", "кстати", "если честно"]
-
-RARE_LINES = [
-    "мне кажется ты специально так отвечаешь 😄",
-    "ты всегда такая или это я везучий?"
-]
-
-
 def extract_signals(text: str):
     t = text.lower()
     return {
@@ -75,48 +58,7 @@ def analyze_context(messages):
     return {"momentum": "neutral"}
 
 
-def detect_style(messages):
-    if not messages:
-        return "neutral"
-
-    avg = sum(len(m) for m in messages) / len(messages)
-
-    if avg < 15:
-        return "short"
-    elif avg > 40:
-        return "long"
-    return "neutral"
-
-
-def humanize(text):
-    parts = [
-        random.choice(REACTIONS),
-        text,
-        random.choice(SOFTENERS),
-        random.choice(HOOKS)
-    ]
-    return " ".join([p for p in parts if p])
-
-
-def add_human_imperfection(text):
-    if random.random() < 0.3:
-        text = text.replace(",", "")
-    if random.random() < 0.2:
-        text += "..."
-    return text
-
-
-def adjust_for_momentum(text, context):
-    if context["momentum"] == "falling":
-        return text + " 😄"
-    if context["momentum"] == "growing":
-        return text.replace("?", "")
-    return text
-
-
-def generate_replies(stage, context, history):
-    style = detect_style(history)
-
+def generate_replies(stage, context):
     if stage == "rapport":
         base = ["с тобой легко общаться", "ты интересный человек", "не скучно с тобой"]
     elif stage == "flirt":
@@ -128,19 +70,4 @@ def generate_replies(stage, context, history):
     else:
         base = ["давай познакомимся", "расскажи о себе", "чем занимаешься"]
 
-    replies = []
-
-    for b in random.sample(base, 3):
-        text = humanize(b)
-        text = adjust_for_momentum(text, context)
-        text = add_human_imperfection(text)
-        replies.append(text)
-
-    if random.random() < 0.1:
-        replies[0] = random.choice(RARE_LINES)
-
-    return {
-        "light": replies[0],
-        "confident": replies[1],
-        "flirt": replies[2]
-    }
+    return base
